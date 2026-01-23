@@ -1,5 +1,24 @@
-mujoco>=3.0.0
-gymnasium==1.1.1
-ray[rllib]>=2.9.0
-torch>=2.0.0
-numpy>=1.24.0
+# MARWS - Multi-Agent Robotic Warehouse System
+# Python 3.9+ required
+
+# Physics simulation
+mujoco>=3.0.0,<4.0.0
+
+# RL environment API
+gymnasium>=0.29.0,<2.0.0
+
+# Reinforcement learning framework
+ray[rllib]>=2.9.0,<3.0.0
+
+# Deep learning backend (required by RLlib)
+torch>=2.0.0,<3.0.0
+
+# Numerical computing
+numpy>=1.24.0,<2.0.0
+
+# Testing (optional)
+pytest>=7.0.0
+
+# For better Ray performance (optional)
+pandas>=2.0.0
+scipy>=1.10.0

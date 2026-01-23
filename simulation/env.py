@@ -208,11 +208,11 @@ class MarwsEnv(gym.Env):
 
             # Early gripper closing reward - only when close AND approaching from above
             # This encourages top-down approach with gripper ready to close
-            if dist_to_package < 0.08 and gripper_pos[2] > package_pos[2]:
-                reward += 0.3 * gripper_closed_amt  # Increased from 0.15
+            if dist_to_package < 0.10 and gripper_pos[2] > package_pos[2]:
+                reward += 0.5 * gripper_closed_amt  # Strong reward for early closing
                 # Penalty for approaching with wide open gripper
                 if gripper_closed_amt < 0.3:
-                    reward -= 0.1
+                    reward -= 0.2
 
             # MILESTONE 2: Package enclosed by gripper (one-time)
             if is_enclosed and not self.enclosed_package:
@@ -230,30 +230,28 @@ class MarwsEnv(gym.Env):
             # Intermediate shaping: reward closing gripper when package is enclosed
             # Only if package is still in place (not pushed) AND gripper is above
             if is_enclosed and gripper_above_package:
-                # Strong reward for closing when properly positioned
-                reward += 1.0 * gripper_closed_amt  # Increased from 0.6
+                # VERY STRONG reward for closing - quadratic to reward full closure more
+                reward += 2.5 * (gripper_closed_amt ** 2)
 
                 # MODERATE PENALTY for hovering with open gripper
-                # Reduced from escalating to fixed to avoid extreme avoidance behavior
                 if gripper_closed_amt < 0.5:  # Gripper mostly open
                     self.hover_frames += 1
-                    # Fixed moderate penalty instead of escalating
-                    reward -= 0.3  # Constant penalty for open gripper while positioned
+                    reward -= 0.5  # Penalty for open gripper while positioned
                 else:
-                    self.hover_frames = max(0, self.hover_frames - 2)  # Reduce if closing
+                    self.hover_frames = max(0, self.hover_frames - 2)
 
                 # PENALTY for keeping gripper open when properly positioned
                 gripper_open_amt = 1.0 - gripper_closed_amt
-                reward -= 0.3 * gripper_open_amt  # Increased from 0.2
+                reward -= 0.5 * gripper_open_amt
 
                 # MILESTONE: Closed gripper on package (one-time, bridges to grasp)
                 if gripper_closed_amt > 0.7 and not self.closed_on_package:
-                    reward += 20.0  # Increased from 15
+                    reward += 35.0  # BIG reward for closing gripper
                     self.closed_on_package = True
 
             # Extra shaping: reward closing gripper when in contact AND above package
             if has_contact and gripper_above_package:
-                reward += 0.8 * gripper_closed_amt  # Increased from 0.4
+                reward += 1.5 * gripper_closed_amt  # Increased from 0.8
 
         else:
             # === PHASE 2: Carry to bin ===
