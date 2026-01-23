@@ -11,9 +11,11 @@ Temp
 4. python -m training.train_single_agent --iterations 250
 
 **HOW TO VIEW SCENE**
+
 View scene python -m scripts.view_scene
 
 **EVALUATE**
+
 python -m scripts.evaluate --episodes 10
 
 **OTHER**
