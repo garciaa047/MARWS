@@ -1,17 +1,14 @@
 Temp 
 
 **RUN THE PROGRAM** 
-1.
-python -m venv venv
 
-2.
-venv\Scripts\activate.bat
+1. python -m venv venv
 
-3.
-pip install -r requirements.txt
+2. venv\Scripts\activate.bat
 
-4.
-python -m training.train_single_agent --iterations 250
+3. pip install -r requirements.txt
+
+4. python -m training.train_single_agent --iterations 250
 
 **HOW TO VIEW SCENE**
 View scene python -m scripts.view_scene
