@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+.pytest_cache/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.claude*
+scripts/check*
+scripts/*test*
+scripts/diagnose*
+docs/
+
+# Virtual environment
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Training outputs
+models/
+checkpoints/
+
+# Build
+build/
+dist/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+MUJOCO_LOG.TXT
+
+# Temporary files
+tmpclaude-*
