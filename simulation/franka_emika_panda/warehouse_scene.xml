@@ -1,10 +1,8 @@
 <mujoco model="warehouse_panda">
-  <compiler angle="radian"/>
+  <!-- Include Panda robot model (same directory) -->
+  <include file="panda.xml"/>
 
-  <option timestep="0.002" gravity="0 0 -9.81" integrator="implicitfast"/>
-
-  <!-- Include Panda robot model -->
-  <include file="../franka_emika_panda/panda.xml"/>
+  <option timestep="0.002" gravity="0 0 -9.81"/>
 
   <asset>
     <texture type="skybox" builtin="gradient" rgb1=".3 .5 .7" rgb2="1 1 1" width="32" height="512"/>
@@ -18,12 +16,12 @@
     <geom name="floor" type="plane" size="2 2 0.1" material="floor_mat"/>
 
     <!-- Delivery Platform - to the right of robot -->
-    <body name="bin_A" pos="0.40 0.35 0.35">
+    <body name="bin_A" pos="0.50 0.35 0.5">
       <geom name="bin_A_base" type="box" size="0.12 0.12 0.02" rgba="0.2 0.7 0.3 1" contype="1" conaffinity="1"/>
     </body>
 
     <!-- Table - directly in front of robot for easy reach -->
-    <body name="table" pos="0.50 0.0 0.50">
+    <body name="table" pos="0.50 -0.35 0.50">
       <geom name="table_top" type="box" size="0.10 0.10 0.02" rgba="0.5 0.4 0.3 1" contype="1" conaffinity="1" solref="0.001 1" solimp="0.95 0.99 0.0005"/>
       <geom name="table_leg1" type="cylinder" size="0.015 0.24" pos="-0.08 -0.08 -0.26" rgba="0.5 0.4 0.3 1"/>
       <geom name="table_leg2" type="cylinder" size="0.015 0.24" pos="0.08 -0.08 -0.26" rgba="0.5 0.4 0.3 1"/>
@@ -32,7 +30,7 @@
     </body>
 
     <!-- Package on table - directly in front of gripper home position -->
-    <body name="package_0" pos="0.50 0.0 0.55">
+    <body name="package_0" pos="0.50 -0.35 0.55">
       <freejoint name="package_0_joint"/>
       <geom name="package_0_geom" type="box" size="0.02 0.02 0.02" mass="0.05" material="package_mat" friction="5 2 2" contype="1" conaffinity="1" solref="0.001 1" solimp="0.95 0.99 0.0005"/>
     </body>

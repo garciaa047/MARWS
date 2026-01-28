@@ -31,37 +31,39 @@ def get_ppo_config():
             minibatch_size=256,      # Increased from 128
             num_epochs=10,           # Increased from 5 - more learning per batch
 
-            # Learning rate: FAST decay to prevent forgetting
+            # Learning rate: decay to near-zero by iteration 125
             # At 20k batch size: 100 iters = 2M timesteps
             lr_schedule=[
                 [0, 5e-4],           # Start high for fast initial learning
                 [500000, 3e-4],      # ~25 iters: still learning
                 [1000000, 1e-4],     # ~50 iters: slow down
-                [2000000, 3e-5],     # ~100 iters: fine-tuning only
-                [4000000, 1e-5],     # ~200 iters: locked in
+                [1500000, 5e-5],     # ~75 iters: fine-tuning
+                [2000000, 1e-5],     # ~100 iters: nearly locked
+                [2500000, 5e-6],     # ~125 iters: frozen
             ],
 
             gamma=0.99,
             lambda_=0.95,  # GAE lambda
 
-            # PPO clipping - slightly tighter for stability
-            clip_param=0.15,         # Reduced from 0.2 - more conservative updates
-            vf_clip_param=10.0,
+            # PPO clipping - tight for stability
+            clip_param=0.15,
+            vf_clip_param=1.0,       # Matched to scaled reward range [-5, 14]
             vf_loss_coeff=0.5,
 
-            # Entropy: decay FAST to lock in policy
+            # Entropy: decay to near-zero by iteration 125
             entropy_coeff_schedule=[
                 [0, 0.02],           # Start with exploration
                 [500000, 0.01],      # ~25 iters: reduce
                 [1000000, 0.003],    # ~50 iters: low
-                [2000000, 0.001],    # ~100 iters: minimal
-                [4000000, 0.0005],   # ~200 iters: nearly zero
+                [1500000, 0.001],    # ~75 iters: minimal
+                [2000000, 0.0003],   # ~100 iters: near-zero
+                [2500000, 0.0001],   # ~125 iters: frozen
             ],
 
-            # KL divergence targeting - CRITICAL for preventing collapse
-            # This penalizes the policy for changing too much from previous version
-            kl_coeff=0.2,            # Start with moderate KL penalty
-            kl_target=0.01,          # Target KL divergence per update
+            # KL divergence targeting - AGGRESSIVE to prevent collapse
+            # Higher coeff + tighter target = stronger constraint on policy change
+            kl_coeff=0.5,            # 2.5x stronger initial KL penalty
+            kl_target=0.005,         # 2x tighter target (was 0.01)
 
             grad_clip=0.5,
 
