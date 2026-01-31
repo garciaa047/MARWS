@@ -4,14 +4,9 @@ from ray.rllib.algorithms.ppo import PPOConfig
 
 
 def get_ppo_config():
-    """Build PPO config optimized to prevent policy collapse.
+    """Build PPO config for staged reward training.
 
-    Key changes to prevent "peak then collapse" behavior:
-    1. Faster LR decay - lock in learning by 100 iterations
-    2. Faster entropy decay - reduce exploration as policy improves
-    3. Larger batch size - more stable gradient estimates
-    4. More SGD epochs - extract more learning per batch
-    5. KL targeting - prevent policy from changing too drastically
+    Tuned for reward range [0, 1] with tanh-based shaping.
     """
     config = (
         PPOConfig()
@@ -20,50 +15,36 @@ def get_ppo_config():
             enable_rl_module_and_learner=False,
             enable_env_runner_and_connector_v2=False,
         )
-        .environment(env="Marws-v0", env_config={"max_steps": 2500})
+        .environment(
+            env="Marws-v0",
+            env_config={"max_steps": 1000}
+        )
         .framework("torch")
         .env_runners(
             num_env_runners=4,
         )
         .training(
-            # Larger batch = more stable updates
-            train_batch_size=20000,  # Increased from 10000
-            minibatch_size=256,      # Increased from 128
-            num_epochs=10,           # Increased from 5 - more learning per batch
+            train_batch_size=10000,
+            minibatch_size=256,
+            num_epochs=5,
 
-            # Learning rate: decay to near-zero by iteration 125
-            # At 20k batch size: 100 iters = 2M timesteps
-            lr_schedule=[
-                [0, 5e-4],           # Start high for fast initial learning
-                [500000, 3e-4],      # ~25 iters: still learning
-                [1000000, 1e-4],     # ~50 iters: slow down
-                [1500000, 5e-5],     # ~75 iters: fine-tuning
-                [2000000, 1e-5],     # ~100 iters: nearly locked
-                [2500000, 5e-6],     # ~125 iters: frozen
-            ],
+            # Learning rate
+            lr=3e-4,
 
             gamma=0.99,
-            lambda_=0.95,  # GAE lambda
+            lambda_=0.95,
 
-            # PPO clipping - tight for stability
-            clip_param=0.15,
-            vf_clip_param=1.0,       # Matched to scaled reward range [-5, 14]
+            # PPO clipping
+            clip_param=0.2,
+            vf_clip_param=1.0,  # Matched to reward range [0, 1]
             vf_loss_coeff=0.5,
 
-            # Entropy: decay to near-zero by iteration 125
-            entropy_coeff_schedule=[
-                [0, 0.02],           # Start with exploration
-                [500000, 0.01],      # ~25 iters: reduce
-                [1000000, 0.003],    # ~50 iters: low
-                [1500000, 0.001],    # ~75 iters: minimal
-                [2000000, 0.0003],   # ~100 iters: near-zero
-                [2500000, 0.0001],   # ~125 iters: frozen
-            ],
+            # Entropy for exploration
+            entropy_coeff=0.01,
 
-            # KL divergence targeting - AGGRESSIVE to prevent collapse
-            # Higher coeff + tighter target = stronger constraint on policy change
-            kl_coeff=0.5,            # 2.5x stronger initial KL penalty
-            kl_target=0.005,         # 2x tighter target (was 0.01)
+            # KL divergence
+            kl_coeff=0.2,
+            kl_target=0.02,
 
             grad_clip=0.5,
 
