@@ -1,0 +1,46 @@
+Here is the best iteration:
+
+  Iter 356: reward=97.7 (per_step=0.144) [exploring]
+    ^ New best! Checkpoint saved.
+
+Here is every 50th iteration starting at 1 up to 450 plus the last 5 iterations:
+
+  Iter 1: reward=25.3 (per_step=0.038) [exploring]
+    ^ New best! Checkpoint saved.
+  Iter 50: reward=72.9 (per_step=0.097) [exploring]
+  Iter 100: reward=58.9 (per_step=0.107) [exploring]
+  Iter 150: reward=37.4 (per_step=0.124) [exploring]
+  Iter 200: reward=47.0 (per_step=0.120) [exploring]
+  Iter 250: reward=62.9 (per_step=0.120) [exploring]
+  Iter 300: reward=58.2 (per_step=0.135) [exploring]
+  Iter 350: reward=84.9 (per_step=0.143) [exploring]
+  Iter 400: reward=65.1 (per_step=0.133) [exploring]
+  Iter 450: reward=91.9 (per_step=0.144) [exploring]
+  Iter 474: reward=61.9 (per_step=0.133) [exploring]
+  Iter 475: reward=60.1 (per_step=0.130) [exploring]
+  Iter 476: reward=58.4 (per_step=0.126) [exploring]
+  Iter 477: reward=60.7 (per_step=0.124) [exploring]
+  Iter 478: reward=65.6 (per_step=0.125) [exploring]
+  Iter 479: reward=58.9 (per_step=0.124) [exploring]
+
+
+Here is the evaluator ouput:
+
+  Episode 1: reward=117.451, steps=913, stage=lift
+  Episode 2: reward=152.994, steps=1000, stage=reach
+  Episode 3: reward=9.440, steps=66, stage=grasp
+  Episode 4: reward=152.190, steps=1000, stage=reach
+  Episode 5: reward=154.302, steps=1000, stage=reach
+  --------------------------------------------------
+
+  Results over 5 episodes:
+    Average reward: 117.275
+    Min reward: 9.440
+    Max reward: 154.302
+
+  Stage distribution:
+    reach :   3 ( 60.0%) ############
+    grasp :   1 ( 20.0%) ####
+    lift  :   1 ( 20.0%) ####
+    hover :   0 (  0.0%)
+    place :   0 (  0.0%)

@@ -9,7 +9,7 @@ class MarwsEnv(gym.Env):
     """Panda robot arm picking a package and placing it on a platform.
 
     Uses robosuite-style staged rewards:
-        - Reaching: 0.0 - 0.30 (distance + orientation + pre-grasp position)
+        - Reaching: 0.0 - 0.35 (distance + orientation + pre-grasp + descent)
         - Grasping: 0.0 or 0.35 (holding package properly)
         - Lifting:  0.35 - 0.5 (lift height)
         - Hovering: 0.5 - 0.7 (distance to bin)
@@ -19,7 +19,9 @@ class MarwsEnv(gym.Env):
         - Distance to package (0-0.10)
         - Gripper pointing downward (0-0.10)
         - Pre-grasp: above package with XY alignment (0-0.10)
+        - Descent bonus: reward for lowering to grasp height when aligned (0-0.05)
 
+    Stability: velocity penalty discourages jerky movements.
     Grasp validation: gripper must be above package and properly positioned.
     Agent receives max(staged_rewards) each step.
     """
@@ -238,14 +240,25 @@ class MarwsEnv(gym.Env):
         downward = self._get_gripper_downward_alignment()
         orient_reward = downward * 0.10
 
-        # Pre-grasp position: 0 to 0.10 (above package with good XY alignment)
+        # Pre-grasp position: 0 to 0.15 (above package with good XY alignment + descent)
         xy_dist = np.linalg.norm(gripper_pos[:2] - package_pos[:2])
-        above_package = gripper_pos[2] > package_pos[2]  # Gripper higher than package
+        height_above = gripper_pos[2] - package_pos[2]
+        above_package = height_above > 0  # Gripper higher than package
         pregrasp_reward = 0.0
         if above_package and downward > 0.5:  # Must be pointing down
-            # Reward for XY alignment (closer = better)
+            # Reward for XY alignment (closer = better) - up to 0.10
             xy_alignment = (1 - np.tanh(10.0 * xy_dist)) * 0.10
             pregrasp_reward = xy_alignment
+
+            # Descent bonus: reward getting closer to grasping height when XY-aligned
+            # Only when well-aligned in XY (within 5cm)
+            if xy_dist < 0.05:
+                # Target height is ~3cm above package (grasping position)
+                # Reward being closer to this height (0 to 0.05 bonus)
+                target_height = 0.03
+                height_error = abs(height_above - target_height)
+                descent_bonus = (1 - np.tanh(15.0 * height_error)) * 0.05
+                pregrasp_reward += descent_bonus
 
         # Combined reach reward
         r_reach = dist_reward + orient_reward + pregrasp_reward
@@ -298,6 +311,14 @@ class MarwsEnv(gym.Env):
         """Main reward function using staged rewards."""
         staged = self.staged_rewards()
         reward = max(staged)
+
+        # Stability penalty: penalize high joint velocities (reduces jerkiness)
+        # This encourages smooth, controlled movements
+        joint_velocities = np.array([self.data.qvel[addr] for addr in self.arm_qvel_addrs])
+        velocity_magnitude = np.linalg.norm(joint_velocities)
+        # Small penalty scaled by velocity (max ~0.02 penalty at high velocities)
+        stability_penalty = 0.005 * min(velocity_magnitude, 4.0)
+        reward -= stability_penalty
 
         # Penalty for dropping package (not over bin)
         if self.prev_gripper_holding and not self.gripper_holding:
