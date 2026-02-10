@@ -1,169 +1,184 @@
-"""Train single-agent MARWS with RLlib PPO and staged rewards."""
+"""Train single-agent MARWS with Stable Baselines3 PPO and staged rewards."""
 import argparse
-import json
 import os
 import signal
 
-import ray
-from ray import tune
-from ray.rllib.algorithms.ppo import PPO
+import numpy as np
+from stable_baselines3 import PPO
+from stable_baselines3.common.callbacks import (
+    BaseCallback,
+    CheckpointCallback,
+    EvalCallback,
+)
+from stable_baselines3.common.vec_env import SubprocVecEnv
 
-from simulation.env import MarwsEnv
 from training.config import get_ppo_config
 
-# Global flag for graceful shutdown
-_shutdown_requested = False
+
+def make_env(rank, seed=0):
+    """Return a callable that creates one MarwsEnv (for SubprocVecEnv)."""
+    def _init():
+        from simulation.env import MarwsEnv
+        env = MarwsEnv()
+        env.reset(seed=seed + rank)
+        return env
+    return _init
 
 
-def _signal_handler(signum, frame):
-    """Handle Ctrl+C gracefully."""
-    global _shutdown_requested
-    if _shutdown_requested:
-        print("\nForce quit requested, exiting immediately...")
-        exit(1)
-    print("\nInterrupt received, will save and exit after current iteration...")
-    _shutdown_requested = True
+class GracefulShutdownCallback(BaseCallback):
+    """Save model and stop training on Ctrl+C."""
+
+    def __init__(self, save_dir, verbose=1):
+        super().__init__(verbose)
+        self.save_dir = save_dir
+        self._shutdown = False
+        self._prev_handler = None
+
+    def _on_training_start(self):
+        self._prev_handler = signal.getsignal(signal.SIGINT)
+        signal.signal(signal.SIGINT, self._handler)
+
+    def _handler(self, signum, frame):
+        if self._shutdown:
+            print("\nForce quit requested, exiting immediately...")
+            raise SystemExit(1)
+        print("\nInterrupt received, will save and exit after current rollout...")
+        self._shutdown = True
+
+    def _on_step(self):
+        if self._shutdown:
+            path = os.path.join(self.save_dir, "interrupt_model")
+            self.model.save(path)
+            if self.verbose:
+                print(f"Model saved to {path}.zip")
+            return False  # stops training
+        return True
+
+    def _on_training_end(self):
+        if self._prev_handler is not None:
+            signal.signal(signal.SIGINT, self._prev_handler)
 
 
-def env_creator(env_config):
-    """Create the MARWS environment."""
-    return MarwsEnv(**env_config)
+class StageTrackingCallback(BaseCallback):
+    """Log the highest reward stage reached each rollout."""
+
+    STAGES = [
+        (0.9, "place"),
+        (0.5, "hover"),
+        (0.35, "lift/grasp"),
+        (0.20, "reach"),
+    ]
+
+    def __init__(self, verbose=1):
+        super().__init__(verbose)
+
+    def _on_rollout_end(self):
+        infos = self.locals.get("infos", [])
+        if not infos:
+            return True
+
+        # SB3 stores episode stats in info["episode"] at episode end
+        ep_rewards = []
+        ep_lengths = []
+        for info in infos:
+            if "episode" in info:
+                ep_rewards.append(info["episode"]["r"])
+                ep_lengths.append(info["episode"]["l"])
+
+        if ep_rewards:
+            mean_reward = np.mean(ep_rewards)
+            mean_length = np.mean(ep_lengths)
+            per_step = mean_reward / max(mean_length, 1)
+
+            stage = "exploring"
+            for threshold, name in self.STAGES:
+                if per_step >= threshold:
+                    stage = name
+                    break
+
+            if self.verbose:
+                print(
+                    f"Rollout: reward={mean_reward:.1f} "
+                    f"(per_step={per_step:.3f}) [{stage}]"
+                )
+        return True
+
+    def _on_step(self):
+        return True
 
 
-def train(
-    num_iterations=500,
-    checkpoint_dir="models/staged",
-    resume=False,
-):
-    """Train with staged rewards (no curriculum).
+def train(timesteps, checkpoint_dir, resume):
+    """Train with staged rewards using SB3 PPO.
 
     Args:
-        num_iterations: Number of training iterations
-        checkpoint_dir: Directory to save checkpoints
-        resume: If True, resume from existing checkpoint
+        timesteps: Total environment timesteps to train for.
+        checkpoint_dir: Directory to save models and TensorBoard logs.
+        resume: Path to a .zip model to resume from, or None.
     """
-    global _shutdown_requested
-    _shutdown_requested = False
+    config = get_ppo_config()
 
-    signal.signal(signal.SIGINT, _signal_handler)
-
-    ray.init(ignore_reinit_error=True)
-    tune.register_env("Marws-v0", env_creator)
+    n_envs = config.pop("n_envs")
+    vec_env = SubprocVecEnv([make_env(i) for i in range(n_envs)])
 
     os.makedirs(checkpoint_dir, exist_ok=True)
+    log_dir = os.path.join(checkpoint_dir, "logs")
 
-    # Training state file
-    state_file = os.path.join(checkpoint_dir, "training_state.json")
-
-    # Check if resuming
-    checkpoint_file = os.path.join(checkpoint_dir, "rllib_checkpoint.json")
-    if resume and os.path.exists(checkpoint_file):
-        print(f"Resuming from checkpoint: {checkpoint_dir}")
-        algo = PPO.from_checkpoint(checkpoint_dir)
-
-        if os.path.exists(state_file):
-            with open(state_file, "r") as f:
-                state = json.load(f)
-            start_iteration = state.get("iteration", 0)
-            best_reward = state.get("best_reward", float("-inf"))
-            print(f"Resuming from iteration {start_iteration}, best reward: {best_reward:.3f}")
-        else:
-            start_iteration = 0
-            best_reward = float("-inf")
+    if resume:
+        print(f"Resuming from {resume}")
+        model = PPO.load(resume, env=vec_env, tensorboard_log=log_dir)
     else:
-        if resume:
-            print("No checkpoint found, starting fresh training")
+        model = PPO("MlpPolicy", vec_env, tensorboard_log=log_dir, verbose=0, **config)
 
-        config = get_ppo_config()
-        algo = config.build_algo()
-        start_iteration = 0
-        best_reward = float("-inf")
+    # Evaluation env (single, non-vectorized)
+    eval_env = SubprocVecEnv([make_env(100)])
 
-    total_iterations = start_iteration
+    callbacks = [
+        GracefulShutdownCallback(save_dir=checkpoint_dir),
+        StageTrackingCallback(),
+        EvalCallback(
+            eval_env,
+            best_model_save_path=checkpoint_dir,
+            eval_freq=config.get("n_steps", 2500) * 10,  # every ~10 rollouts
+            n_eval_episodes=5,
+            deterministic=True,
+            verbose=1,
+        ),
+        CheckpointCallback(
+            save_freq=config.get("n_steps", 2500) * 50,  # every ~50 rollouts
+            save_path=checkpoint_dir,
+            name_prefix="checkpoint",
+        ),
+    ]
 
     print(f"\n{'='*60}")
-    print("MARWS Training with Staged Rewards")
+    print("MARWS Training with Staged Rewards (SB3 PPO)")
     print(f"{'='*60}")
+    print(f"Timesteps: {timesteps:,}")
+    print(f"Envs: {n_envs}  |  n_steps: {model.n_steps}  |  batch_size: {model.batch_size}")
     print("Reward stages: reach(0.30) -> grasp(0.35) -> lift(0.5) -> hover(0.7) -> place(1.0)")
+    print(f"TensorBoard: tensorboard --logdir {os.path.abspath(log_dir)}")
     print(f"{'='*60}\n")
 
     try:
-        for i in range(num_iterations):
-            result = algo.train()
-            total_iterations = start_iteration + i + 1
-
-            # Extract metrics
-            env_runners = result.get("env_runners", {})
-            reward = env_runners.get("episode_reward_mean", 0.0)
-            ep_len = env_runners.get("episode_len_mean", 1000.0)
-
-            # Handle numpy types
-            if hasattr(reward, 'item'):
-                reward = reward.item()
-            if hasattr(ep_len, 'item'):
-                ep_len = ep_len.item()
-
-            # Compute per-step reward for stage detection
-            per_step = reward / max(ep_len, 1)
-
-            # Determine stage from per-step reward
-            if per_step >= 0.9:
-                stage = "place"
-            elif per_step >= 0.5:
-                stage = "hover"
-            elif per_step >= 0.35:
-                stage = "lift/grasp"
-            elif per_step >= 0.20:
-                stage = "reach"
-            else:
-                stage = "exploring"
-
-            print(f"Iter {total_iterations}: reward={reward:.1f} (per_step={per_step:.3f}) [{stage}]")
-
-            # Save checkpoint if best so far
-            if reward > best_reward:
-                best_reward = reward
-                algo.save(checkpoint_dir)
-                with open(state_file, "w") as f:
-                    json.dump({
-                        "iteration": total_iterations,
-                        "best_reward": best_reward,
-                    }, f)
-                print(f"  ^ New best! Checkpoint saved.")
-
-            # Check for graceful shutdown
-            if _shutdown_requested:
-                print(f"\nGraceful shutdown after iteration {total_iterations}")
-                break
-
+        model.learn(total_timesteps=timesteps, callback=callbacks, progress_bar=True)
     finally:
-        # Save final state
-        with open(state_file, "w") as f:
-            json.dump({
-                "iteration": total_iterations,
-                "best_reward": best_reward,
-            }, f)
-
-        print(f"\nTraining complete. Iterations: {total_iterations}")
-        print(f"Best reward: {best_reward:.3f}")
-        print(f"Checkpoint location: {os.path.abspath(checkpoint_dir)}")
-
-        algo.stop()
-        ray.shutdown()
-
-    return checkpoint_dir
+        latest_path = os.path.join(checkpoint_dir, "latest_model")
+        model.save(latest_path)
+        print(f"\nTraining complete. Model saved to {latest_path}.zip")
+        print(f"Best model (from eval): {os.path.join(checkpoint_dir, 'best_model.zip')}")
+        vec_env.close()
+        eval_env.close()
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--iterations", type=int, default=500)
-    parser.add_argument("--checkpoint-dir", type=str, default=os.path.abspath("models/staged"))
-    parser.add_argument("--resume", action="store_true",
-                        help="Resume training from existing checkpoint")
+    parser = argparse.ArgumentParser(description="Train MARWS with SB3 PPO")
+    parser.add_argument("--timesteps", type=int, default=5_000_000,
+                        help="Total environment timesteps (default: 5M)")
+    parser.add_argument("--checkpoint-dir", type=str,
+                        default=os.path.abspath("models/staged"),
+                        help="Directory for models and logs")
+    parser.add_argument("--resume", type=str, default=None,
+                        help="Path to .zip model to resume training from")
     args = parser.parse_args()
 
-    train(
-        args.iterations,
-        args.checkpoint_dir,
-        args.resume,
-    )
+    train(args.timesteps, args.checkpoint_dir, args.resume)

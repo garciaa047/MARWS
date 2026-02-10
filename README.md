@@ -1,26 +1,53 @@
-Temp 
+# MARWS - Multi-Agent Robotic Warehouse System
 
-**RUN THE PROGRAM** 
+Franka Emika Panda robot arm trained with PPO (Stable Baselines3) to pick and place packages.
 
-1. python -m venv venv
+## Setup
 
-2. venv\Scripts\activate.bat
+```bash
+python -m venv venv
+venv\Scripts\activate.bat
+pip install -r requirements.txt
+```
 
-3. pip install -r requirements.txt
+## Train
 
-4. python -m training.train_single_agent --iterations 250
+```bash
+python -m training.train_single_agent --timesteps 5000000
+```
 
-**HOW TO VIEW SCENE**
+Resume from a saved model:
 
-View scene python -m scripts.view_scene
+```bash
+python -m training.train_single_agent --resume models/staged/latest_model.zip
+```
 
-**EVALUATE**
+Monitor with TensorBoard:
 
-python -m scripts.evaluate --episodes 10
+```bash
+tensorboard --logdir models/staged/logs
+```
 
-**OTHER**
+## Evaluate
 
-I had to add os.path.abspath("models/single_agent") to
+```bash
+python -m scripts.evaluate --model models/staged/best_model.zip --episodes 10
+```
 
-parser.add_argument("--checkpoint-dir", type=str, default=os.path.abspath("models/single_agent"))
-in train_single_agent line 58
+Without rendering:
+
+```bash
+python -m scripts.evaluate --model models/staged/best_model.zip --episodes 10 --no-render
+```
+
+## View Scene
+
+```bash
+python -m scripts.view_scene
+```
+
+## Tests
+
+```bash
+pytest tests/test_env.py -v
+```

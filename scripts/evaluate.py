@@ -1,37 +1,26 @@
 """Evaluate a trained policy with visualization."""
 import argparse
 import time
-import os
 
-import ray
 import numpy as np
-from ray import tune
-from ray.rllib.algorithms.ppo import PPO
+from stable_baselines3 import PPO
 
 from simulation.env import MarwsEnv
 
 
-def env_creator(env_config):
-    """Create the MARWS environment."""
-    return MarwsEnv(**env_config)
-
-
-def evaluate(checkpoint_path="models/staged", num_episodes=5, render=True, speed=1.0, seed=None, deterministic=False):
+def evaluate(model_path, num_episodes=5, render=True, speed=1.0, seed=None, deterministic=True):
     """Evaluate a trained policy.
 
     Args:
-        checkpoint_path: Path to checkpoint
-        num_episodes: Number of episodes to run
-        render: Whether to render visualization
-        speed: Playback speed multiplier
-        seed: Random seed for reproducibility
-        deterministic: If True, use deterministic actions
+        model_path: Path to SB3 model .zip file.
+        num_episodes: Number of episodes to run.
+        render: Whether to render visualization.
+        speed: Playback speed multiplier.
+        seed: Random seed for reproducibility.
+        deterministic: If True, use deterministic actions.
     """
-    ray.init(ignore_reinit_error=True)
-    tune.register_env("Marws-v0", env_creator)
-
-    algo = PPO.from_checkpoint(checkpoint_path)
-    env = env_creator({"render_mode": "human" if render else None})
+    model = PPO.load(model_path)
+    env = MarwsEnv(render_mode="human" if render else None)
 
     total_rewards = []
     stage_counts = {"reach": 0, "grasp": 0, "lift": 0, "hover": 0, "place": 0}
@@ -48,7 +37,7 @@ def evaluate(checkpoint_path="models/staged", num_episodes=5, render=True, speed
         highest_stage = "reach"
 
         while not done:
-            action = algo.compute_single_action(obs, explore=not deterministic)
+            action, _ = model.predict(obs, deterministic=deterministic)
             obs, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
             episode_reward += reward
@@ -62,7 +51,7 @@ def evaluate(checkpoint_path="models/staged", num_episodes=5, render=True, speed
 
             if render:
                 env.render()
-                time.sleep(0.05 / speed)  # 20 Hz control
+                time.sleep(0.05 / speed)
 
         total_rewards.append(episode_reward)
         stage_counts[highest_stage] += 1
@@ -71,11 +60,9 @@ def evaluate(checkpoint_path="models/staged", num_episodes=5, render=True, speed
         print(f"Episode {ep+1}: reward={episode_reward:.3f}, steps={steps}, stage={highest_stage} {success_str}")
 
     env.close()
-    algo.stop()
-    ray.shutdown()
 
     # Summary
-    avg_reward = sum(total_rewards) / len(total_rewards)
+    avg_reward = np.mean(total_rewards)
     print("-" * 50)
     print(f"\nResults over {num_episodes} episodes:")
     print(f"  Average reward: {avg_reward:.3f}")
@@ -91,17 +78,18 @@ def evaluate(checkpoint_path="models/staged", num_episodes=5, render=True, speed
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", type=str, default="models/staged", help="Path to checkpoint")
+    parser = argparse.ArgumentParser(description="Evaluate a trained MARWS policy")
+    parser.add_argument("--model", type=str, default="models/staged/best_model.zip",
+                        help="Path to SB3 model .zip file")
     parser.add_argument("--episodes", type=int, default=5)
     parser.add_argument("--no-render", action="store_true")
     parser.add_argument("--speed", type=float, default=1.0,
                         help="Playback speed multiplier")
     parser.add_argument("--seed", type=int, default=None,
                         help="Random seed for reproducibility")
-    parser.add_argument("--deterministic", action="store_true",
-                        help="Use deterministic actions")
+    parser.add_argument("--stochastic", action="store_true",
+                        help="Use stochastic (non-deterministic) actions")
     args = parser.parse_args()
 
-    evaluate(os.path.abspath(args.checkpoint), args.episodes, not args.no_render,
-             args.speed, args.seed, args.deterministic)
+    evaluate(args.model, args.episodes, not args.no_render,
+             args.speed, args.seed, not args.stochastic)

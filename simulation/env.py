@@ -12,7 +12,7 @@ class MarwsEnv(gym.Env):
         - Reaching: 0.0 - 0.35 (distance + orientation + pre-grasp + descent)
         - Grasping: 0.0 or 0.35 (holding package properly)
         - Lifting:  0.35 - 0.5 (lift height)
-        - Hovering: 0.5 - 0.7 (distance to bin)
+        - Hovering: 0.5 - 0.7 (XY distance to bin + height maintenance)
         - Placing:  1.0 (package in bin)
 
     Reach reward components:
@@ -22,7 +22,8 @@ class MarwsEnv(gym.Env):
         - Descent bonus: reward for lowering to grasp height when aligned (0-0.05)
 
     Stability: velocity penalty discourages jerky movements.
-    Grasp validation: gripper must be above package and properly positioned.
+    Grasp validation: uses hysteresis (strict acquire, lenient maintain)
+    with a grace period to prevent flicker-drop penalties.
     Agent receives max(staged_rewards) each step.
     """
 
@@ -38,6 +39,9 @@ class MarwsEnv(gym.Env):
         (-0.0175, 3.7525),   # joint6
         (-2.8973, 2.8973),   # joint7
     ]
+
+    # Table surface height (table pos z=0.50 + half-height 0.02)
+    TABLE_SURFACE_Z = 0.52
 
     def __init__(self, render_mode=None, max_steps=1000):
         super().__init__()
@@ -58,14 +62,15 @@ class MarwsEnv(gym.Env):
         # Cache IDs for faster access
         self._cache_ids()
 
-        # Observation space (22-dim):
+        # Observation space (23-dim):
         # - joint_positions: 7
         # - joint_velocities: 7
         # - gripper_state: 1
         # - gripper_holding: 1
         # - gripper_to_package_vector: 3
         # - package_to_bin_vector: 3
-        obs_dim = 7 + 7 + 1 + 1 + 3 + 3  # = 22
+        # - package_height_above_table: 1
+        obs_dim = 7 + 7 + 1 + 1 + 3 + 3 + 1  # = 23
 
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
@@ -89,6 +94,10 @@ class MarwsEnv(gym.Env):
         # Grasp detection - higher threshold to avoid false positives
         self.grasp_contact_frames = 0
         self.GRASP_CONTACT_THRESHOLD = 5
+
+        # Grasp release grace period (prevents flicker-drop penalties)
+        self.frames_since_grasp_lost = 0
+        self.GRASP_GRACE_FRAMES = 10  # Allow 10 frames before counting as a drop
 
         # Reward tracking
         self.prev_gripper_holding = False
@@ -147,6 +156,7 @@ class MarwsEnv(gym.Env):
 
         # Reset grasp detection
         self.grasp_contact_frames = 0
+        self.frames_since_grasp_lost = 0
 
         # Reset reward tracking
         self.prev_gripper_holding = False
@@ -283,10 +293,18 @@ class MarwsEnv(gym.Env):
                 r_lift = 0.35 + height_progress * 0.15
 
         # Hovering: 0.5 to 0.7 (only if lifted enough with valid grasp)
+        # Includes height maintenance: agent must keep the package above the
+        # table surface during transport to avoid dragging it into the edge.
         r_hover = 0.0
         if r_lift > 0.4 and lift_height > 0.08:  # Must have actually lifted
             dist_to_bin = np.linalg.norm(package_pos[:2] - bin_pos[:2])
-            r_hover = 0.5 + (1 - np.tanh(5.0 * dist_to_bin)) * 0.2
+            # XY approach reward: 0 to 0.15
+            xy_approach = (1 - np.tanh(5.0 * dist_to_bin)) * 0.15
+            # Height maintenance reward: 0 to 0.05
+            # Reward keeping package well above the table surface (>=10cm)
+            clearance = package_pos[2] - self.TABLE_SURFACE_Z
+            height_bonus = min(max(clearance / 0.10, 0.0), 1.0) * 0.05
+            r_hover = 0.5 + xy_approach + height_bonus
 
         # Placing: 1.0 (package in bin)
         r_place = 1.0 if self._check_package_in_bin() else 0.0
@@ -320,9 +338,16 @@ class MarwsEnv(gym.Env):
         stability_penalty = 0.005 * min(velocity_magnitude, 4.0)
         reward -= stability_penalty
 
-        # Penalty for dropping package (not over bin)
+        # Penalty for dropping package (not over bin).
+        # Only penalize when the package has truly fallen away from
+        # the gripper, not during momentary contact flicker (the grace
+        # period in _update_gripper_holding handles debouncing).
         if self.prev_gripper_holding and not self.gripper_holding:
-            if not self._check_package_in_bin():
+            package_pos = self._get_package_position()
+            gripper_pos = self._get_gripper_position()
+            drop_dist = np.linalg.norm(gripper_pos - package_pos)
+            # Only penalize if package has actually separated AND is not in the bin
+            if drop_dist > 0.10 and not self._check_package_in_bin():
                 reward -= 0.5
 
         # Penalty for package falling off table
@@ -350,25 +375,52 @@ class MarwsEnv(gym.Env):
         return dx < 0.10 and dy < 0.10 and 0.01 < dz < 0.15
 
     def _update_gripper_holding(self):
-        """Update gripper holding state based on contact detection."""
+        """Update gripper holding state based on contact detection.
+
+        Uses hysteresis: stricter conditions to acquire grasp, more
+        lenient conditions to maintain it during transport. Also tracks
+        a grace period so momentary contact loss doesn't instantly
+        count as a drop.
+        """
         finger_touching = self._check_finger_package_contact()
         finger_pos = self._get_finger_qpos()
-        gripper_closed_enough = finger_pos < 0.025  # Tighter grip required
+        gripper_closed_enough = finger_pos < 0.025
 
-        # Check gripper is properly positioned (above package, close in XY)
         gripper_pos = self._get_gripper_position()
         package_pos = self._get_package_position()
-        xy_dist = np.linalg.norm(gripper_pos[:2] - package_pos[:2])
-        gripper_above = gripper_pos[2] > package_pos[2] - 0.02
-        properly_positioned = xy_dist < 0.06 and gripper_above
+        dist_to_package = np.linalg.norm(gripper_pos - package_pos)
 
-        if finger_touching and gripper_closed_enough and properly_positioned:
-            self.grasp_contact_frames += 1
-            if self.grasp_contact_frames >= self.GRASP_CONTACT_THRESHOLD:
-                self.gripper_holding = True
+        if self.gripper_holding:
+            # Maintaining grasp: more lenient - just check the package
+            # is still close to the gripper and fingers are closed.
+            # During transport the package can shift slightly.
+            still_holding = (
+                finger_touching
+                and gripper_closed_enough
+                and dist_to_package < 0.12
+            )
+            if still_holding:
+                self.frames_since_grasp_lost = 0
+            else:
+                self.frames_since_grasp_lost += 1
+                # Grace period: don't drop immediately on brief contact loss
+                if self.frames_since_grasp_lost > self.GRASP_GRACE_FRAMES:
+                    self.gripper_holding = False
+                    self.grasp_contact_frames = 0
+                    self.frames_since_grasp_lost = 0
         else:
-            self.grasp_contact_frames = 0
-            self.gripper_holding = False
+            # Acquiring grasp: stricter positioning requirements
+            xy_dist = np.linalg.norm(gripper_pos[:2] - package_pos[:2])
+            gripper_above = gripper_pos[2] > package_pos[2] - 0.02
+            properly_positioned = xy_dist < 0.06 and gripper_above
+
+            if finger_touching and gripper_closed_enough and properly_positioned:
+                self.grasp_contact_frames += 1
+                if self.grasp_contact_frames >= self.GRASP_CONTACT_THRESHOLD:
+                    self.gripper_holding = True
+                    self.frames_since_grasp_lost = 0
+            else:
+                self.grasp_contact_frames = 0
 
     def _check_finger_package_contact(self):
         """Check if either finger is in contact with the package."""
@@ -417,6 +469,10 @@ class MarwsEnv(gym.Env):
         bin_pos = self._get_bin_position()
         pkg_to_bin = bin_pos - package_pos
         obs.extend(pkg_to_bin)
+
+        # Package height above table surface (1) - helps agent learn clearance
+        height_above_table = package_pos[2] - self.TABLE_SURFACE_Z
+        obs.append(height_above_table)
 
         return np.array(obs, dtype=np.float32)
 

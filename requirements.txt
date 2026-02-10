@@ -1,5 +1,5 @@
 # MARWS - Multi-Agent Robotic Warehouse System
-# Python 3.9-3.11 recommended (Ray has best support for these)
+# Python 3.11+ recommended
 
 # Physics simulation
 mujoco>=3.0.0
@@ -8,15 +8,16 @@ mujoco>=3.0.0
 gymnasium>=0.29.0
 
 # Reinforcement learning framework
-# Note: On Windows, Ray may have limited version availability
-# If installation fails, try: pip install ray[rllib]==2.10.0
-ray[rllib]>=2.7.0
+stable-baselines3[extra]>=2.3.0
 
-# Deep learning backend (required by RLlib)
+# Deep learning backend (required by SB3)
 torch>=2.0.0
 
+# TensorBoard logging
+tensorboard>=2.14.0
+
 # Numerical computing
-numpy>=1.24.0,<2.0.0
+numpy>=1.24.0
 
 # Testing (optional)
 pytest>=7.0.0

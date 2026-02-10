@@ -77,12 +77,12 @@ class CurriculumManager:
             return 0.0
         return sum(self.episode_successes) / len(self.episode_successes)
 
-    def update(self, algo, iteration_result):
+    def update(self, model, iteration_result):
         """Update curriculum state after a training iteration.
 
         Args:
-            algo: The RLlib algorithm (for saving checkpoints)
-            iteration_result: Result dict from algo.train()
+            model: The SB3 model (for saving checkpoints)
+            iteration_result: Result dict from training
 
         Returns:
             dict with curriculum info for logging
@@ -95,7 +95,6 @@ class CurriculumManager:
         hist = env_runners.get("hist_stats", {})
 
         # Get success info from episodes
-        # RLlib stores custom info in episode data
         episode_infos = iteration_result.get("episodes_this_iter", 0)
 
         # Track success rate
@@ -115,7 +114,7 @@ class CurriculumManager:
         # Check for advancement
         advanced = False
         if self._should_advance():
-            self._advance_stage(algo)
+            self._advance_stage(model)
             advanced = True
 
         return {
@@ -146,15 +145,14 @@ class CurriculumManager:
         # Need to meet success threshold
         return self.get_success_rate() >= self.advancement_threshold
 
-    def _advance_stage(self, algo):
+    def _advance_stage(self, model):
         """Advance to next curriculum stage."""
         # Save checkpoint for current stage
-        stage_checkpoint_dir = os.path.join(
+        stage_checkpoint_path = os.path.join(
             self.checkpoint_dir,
             f"stage{self.current_stage}_{self.get_stage_name()}"
         )
-        os.makedirs(stage_checkpoint_dir, exist_ok=True)
-        algo.save(stage_checkpoint_dir)
+        model.save(stage_checkpoint_path)
 
         # Record history
         self.stage_history.append({
@@ -175,7 +173,7 @@ class CurriculumManager:
         print(f"\n{'='*60}")
         print(f"CURRICULUM ADVANCEMENT: Stage {self.current_stage - 1} -> Stage {self.current_stage}")
         print(f"Now training: {self.get_stage_name()}")
-        print(f"Checkpoint saved to: {stage_checkpoint_dir}")
+        print(f"Checkpoint saved to: {stage_checkpoint_path}.zip")
         print(f"{'='*60}\n")
 
     def save_state(self, filepath=None):

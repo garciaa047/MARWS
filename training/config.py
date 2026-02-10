@@ -1,61 +1,43 @@
 """Training configuration for MARWS."""
 
-from ray.rllib.algorithms.ppo import PPOConfig
+from torch import nn
 
 
 def get_ppo_config():
-    """Build PPO config for staged reward training.
+    """Return SB3 PPO kwargs for staged reward training.
 
     Tuned for reward range [0, 1] with tanh-based shaping.
     """
-    config = (
-        PPOConfig()
-        # Disable new API stack to use legacy config style
-        .api_stack(
-            enable_rl_module_and_learner=False,
-            enable_env_runner_and_connector_v2=False,
-        )
-        .environment(
-            env="Marws-v0",
-            env_config={"max_steps": 1000}
-        )
-        .framework("torch")
-        .env_runners(
-            num_env_runners=4,
-        )
-        .training(
-            train_batch_size=10000,
-            minibatch_size=256,
-            num_epochs=5,
+    return dict(
+        # Rollout
+        n_steps=2500,
+        n_envs=4,  # not a PPO kwarg; used by train script to set up SubprocVecEnv
 
-            # Learning rate
-            lr=3e-4,
+        # Mini-batch SGD
+        batch_size=256,
+        n_epochs=5,
 
-            gamma=0.99,
-            lambda_=0.95,
+        # Learning rate
+        learning_rate=3e-4,
 
-            # PPO clipping
-            clip_param=0.2,
-            vf_clip_param=1.0,  # Matched to reward range [0, 1]
-            vf_loss_coeff=0.5,
+        # Discount / GAE
+        gamma=0.99,
+        gae_lambda=0.95,
 
-            # Entropy for exploration
-            entropy_coeff=0.01,
+        # PPO clipping
+        clip_range=0.2,
+        clip_range_vf=1.0,
 
-            # KL divergence
-            kl_coeff=0.2,
-            kl_target=0.02,
+        # Loss coefficients
+        vf_coef=0.5,
+        ent_coef=0.01,
 
-            grad_clip=0.5,
+        # Gradient clipping
+        max_grad_norm=0.5,
 
-            model={
-                "fcnet_hiddens": [256, 256],
-                "fcnet_activation": "tanh",
-            },
-        )
-        .evaluation(
-            evaluation_interval=10,
-            evaluation_duration=5,
-        )
+        # Network architecture
+        policy_kwargs=dict(
+            net_arch=[256, 256],
+            activation_fn=nn.Tanh,
+        ),
     )
-    return config

@@ -34,6 +34,7 @@ dist/
 Thumbs.db
 
 # Logs
+logs/
 *.log
 MUJOCO_LOG.TXT
 
