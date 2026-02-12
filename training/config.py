@@ -14,7 +14,7 @@ def get_ppo_config():
         n_envs=4,  # not a PPO kwarg; used by train script to set up SubprocVecEnv
 
         # Mini-batch SGD
-        batch_size=256,
+        batch_size=250,  # Must evenly divide n_steps * n_envs (2500 * 4 = 10000)
         n_epochs=5,
 
         # Learning rate
@@ -30,7 +30,7 @@ def get_ppo_config():
 
         # Loss coefficients
         vf_coef=0.5,
-        ent_coef=0.01,
+        ent_coef=0.02,
 
         # Gradient clipping
         max_grad_norm=0.5,

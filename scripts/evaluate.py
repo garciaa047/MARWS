@@ -23,7 +23,7 @@ def evaluate(model_path, num_episodes=5, render=True, speed=1.0, seed=None, dete
     env = MarwsEnv(render_mode="human" if render else None)
 
     total_rewards = []
-    stage_counts = {"reach": 0, "grasp": 0, "lift": 0, "hover": 0, "place": 0}
+    stage_counts = {"reach": 0, "contact": 0, "grasp": 0, "lift": 0, "hover": 0, "place": 0}
 
     print(f"\nEvaluating {num_episodes} episodes...")
     print("-" * 50)
@@ -45,7 +45,7 @@ def evaluate(model_path, num_episodes=5, render=True, speed=1.0, seed=None, dete
 
             # Track highest stage
             current_stage = info.get("highest_stage", "reach")
-            stage_order = ["reach", "grasp", "lift", "hover", "place"]
+            stage_order = ["reach", "contact", "grasp", "lift", "hover", "place"]
             if stage_order.index(current_stage) > stage_order.index(highest_stage):
                 highest_stage = current_stage
 

@@ -9,17 +9,22 @@ class MarwsEnv(gym.Env):
     """Panda robot arm picking a package and placing it on a platform.
 
     Uses robosuite-style staged rewards:
-        - Reaching: 0.0 - 0.35 (distance + orientation + pre-grasp + descent)
-        - Grasping: 0.0 or 0.35 (holding package properly)
-        - Lifting:  0.35 - 0.5 (lift height)
-        - Hovering: 0.5 - 0.7 (XY distance to bin + height maintenance)
+        - Reaching: 0.0 - 0.25 (distance + orientation + pre-grasp + descent + gripper close)
+        - Contact: 0.25 - 0.35 (finger-package contact while gripper closing)
+        - Grasping: 0.0 or 0.40 (holding package properly)
+        - Lifting:  0.40 - 0.55 (lift height)
+        - Hovering: 0.55 - 0.75 (XY distance to bin + height maintenance)
         - Placing:  1.0 (package in bin)
 
     Reach reward components:
-        - Distance to package (0-0.10)
-        - Gripper pointing downward (0-0.10)
-        - Pre-grasp: above package with XY alignment (0-0.10)
+        - Distance to package (0-0.05)
+        - Gripper pointing downward (0-0.05)
+        - Pre-grasp: above package with XY alignment (0-0.05)
         - Descent bonus: reward for lowering to grasp height when aligned (0-0.05)
+        - Gripper closing: reward for closing gripper when positioned to grasp (0-0.05)
+
+    Contact bridge: rewards finger-package contact with partial gripper
+    closure, smoothly transitioning from reach to grasp.
 
     Stability: velocity penalty discourages jerky movements.
     Grasp validation: uses hysteresis (strict acquire, lenient maintain)
@@ -89,11 +94,12 @@ class MarwsEnv(gym.Env):
 
         # Delta action control
         self.delta_action_scale = 0.05
+        self.gripper_delta_scale = 0.15  # 3x faster gripper response
         self.current_target = None
 
-        # Grasp detection - higher threshold to avoid false positives
+        # Grasp detection - requires sustained contact
         self.grasp_contact_frames = 0
-        self.GRASP_CONTACT_THRESHOLD = 5
+        self.GRASP_CONTACT_THRESHOLD = 3
 
         # Grasp release grace period (prevents flicker-drop penalties)
         self.frames_since_grasp_lost = 0
@@ -167,9 +173,10 @@ class MarwsEnv(gym.Env):
     def step(self, action):
         self.current_step += 1
 
-        # Delta action control
-        action = np.array(action)
+        # Delta action control (separate scale for gripper)
+        action = np.array(action, dtype=np.float64)
         delta = action * self.delta_action_scale
+        delta[7] = action[7] * self.gripper_delta_scale
         self.current_target = np.clip(self.current_target + delta, -1.0, 1.0)
 
         # Map to joint control ranges
@@ -235,54 +242,74 @@ class MarwsEnv(gym.Env):
         """Calculate rewards for each stage.
 
         Returns:
-            tuple: (reach, grasp, lift, hover, place) rewards
+            tuple: (reach, contact, grasp, lift, hover, place) rewards
         """
         gripper_pos = self._get_gripper_position()
         package_pos = self._get_package_position()
         bin_pos = self._get_bin_position()
 
-        # Reaching: 0 to 0.30 (distance + orientation + position)
-        # Distance component: 0 to 0.10
+        # Reaching: 0 to 0.25 (distance + orientation + position + gripper close)
+        # Distance component: 0 to 0.05
         dist_to_package = np.linalg.norm(gripper_pos - package_pos)
-        dist_reward = (1 - np.tanh(5.0 * dist_to_package)) * 0.10
+        dist_reward = (1 - np.tanh(5.0 * dist_to_package)) * 0.05
 
-        # Orientation component: 0 to 0.10 (gripper pointing down)
+        # Orientation component: 0 to 0.05 (gripper pointing down)
         downward = self._get_gripper_downward_alignment()
-        orient_reward = downward * 0.10
+        orient_reward = downward * 0.05
 
-        # Pre-grasp position: 0 to 0.15 (above package with good XY alignment + descent)
+        # Pre-grasp position: 0 to 0.15 (XY alignment + descent + gripper closing)
         xy_dist = np.linalg.norm(gripper_pos[:2] - package_pos[:2])
         height_above = gripper_pos[2] - package_pos[2]
         above_package = height_above > 0  # Gripper higher than package
         pregrasp_reward = 0.0
         if above_package and downward > 0.5:  # Must be pointing down
-            # Reward for XY alignment (closer = better) - up to 0.10
-            xy_alignment = (1 - np.tanh(10.0 * xy_dist)) * 0.10
+            # Reward for XY alignment (closer = better) - up to 0.05
+            # Wider gradient (tanh 5.0) so agent sees signal at larger distances
+            xy_alignment = (1 - np.tanh(5.0 * xy_dist)) * 0.05
             pregrasp_reward = xy_alignment
 
             # Descent bonus: reward getting closer to grasping height when XY-aligned
-            # Only when well-aligned in XY (within 5cm)
-            if xy_dist < 0.05:
+            # Relaxed XY threshold (8cm) and gentler tanh (5.0) for wider gradient
+            if xy_dist < 0.08:
                 # Target height is ~3cm above package (grasping position)
-                # Reward being closer to this height (0 to 0.05 bonus)
                 target_height = 0.03
                 height_error = abs(height_above - target_height)
-                descent_bonus = (1 - np.tanh(15.0 * height_error)) * 0.05
+                descent_bonus = (1 - np.tanh(5.0 * height_error)) * 0.05
                 pregrasp_reward += descent_bonus
 
-        # Combined reach reward
+                # Gripper closing bonus: 0 to 0.05
+                # Relaxed height threshold (12cm) so agent learns to close
+                # earlier in the approach rather than only at the last moment
+                if height_above < 0.12:
+                    finger_pos = self._get_finger_qpos()
+                    # finger_pos: 0.04 = fully open, 0 = fully closed
+                    gripper_closedness = 1.0 - (finger_pos / 0.04)
+                    pregrasp_reward += gripper_closedness * 0.05
+
+        # Combined reach reward (max 0.25)
         r_reach = dist_reward + orient_reward + pregrasp_reward
 
-        # Grasping: 0 or 0.35
+        # Contact bridge: 0.25 to 0.35 (finger touching package + gripper closing)
+        # Bridges the gap between reach (0.25 max) and grasp (0.40).
+        # The agent gets rewarded for making contact and closing, even before
+        # the full grasp criteria (sustained contact for N frames) are met.
+        r_contact = 0.0
+        if self._check_finger_package_contact() and above_package:
+            finger_pos = self._get_finger_qpos()
+            gripper_closedness = 1.0 - (finger_pos / 0.04)
+            if gripper_closedness > 0.2:  # At least starting to close
+                r_contact = 0.25 + min(gripper_closedness, 1.0) * 0.10
+
+        # Grasping: 0 or 0.40
         # Must be a valid grasp: gripper above package (within XY tolerance)
         r_grasp = 0.0
         if self.gripper_holding:
-            xy_dist = np.linalg.norm(gripper_pos[:2] - package_pos[:2])
+            xy_dist_grasp = np.linalg.norm(gripper_pos[:2] - package_pos[:2])
             gripper_above = gripper_pos[2] > package_pos[2] - 0.05  # Allow slight tolerance
-            if xy_dist < 0.08 and gripper_above:
-                r_grasp = 0.35
+            if xy_dist_grasp < 0.08 and gripper_above:
+                r_grasp = 0.40
 
-        # Lifting: 0.35 to 0.5 (only if valid grasp)
+        # Lifting: 0.40 to 0.55 (only if valid grasp)
         r_lift = 0.0
         lift_height = package_pos[2] - self.initial_package_z
         if r_grasp > 0:  # Only count lift if grasp is valid
@@ -290,13 +317,13 @@ class MarwsEnv(gym.Env):
             if dist_to_package < 0.15:
                 target_height = 0.15  # 15cm target lift
                 height_progress = max(0, min(lift_height / target_height, 1.0))
-                r_lift = 0.35 + height_progress * 0.15
+                r_lift = 0.40 + height_progress * 0.15
 
-        # Hovering: 0.5 to 0.7 (only if lifted enough with valid grasp)
+        # Hovering: 0.55 to 0.75 (only if lifted enough with valid grasp)
         # Includes height maintenance: agent must keep the package above the
         # table surface during transport to avoid dragging it into the edge.
         r_hover = 0.0
-        if r_lift > 0.4 and lift_height > 0.08:  # Must have actually lifted
+        if r_lift > 0.50 and lift_height > 0.08:  # Must have actually lifted
             dist_to_bin = np.linalg.norm(package_pos[:2] - bin_pos[:2])
             # XY approach reward: 0 to 0.15
             xy_approach = (1 - np.tanh(5.0 * dist_to_bin)) * 0.15
@@ -304,24 +331,26 @@ class MarwsEnv(gym.Env):
             # Reward keeping package well above the table surface (>=10cm)
             clearance = package_pos[2] - self.TABLE_SURFACE_Z
             height_bonus = min(max(clearance / 0.10, 0.0), 1.0) * 0.05
-            r_hover = 0.5 + xy_approach + height_bonus
+            r_hover = 0.55 + xy_approach + height_bonus
 
         # Placing: 1.0 (package in bin)
         r_place = 1.0 if self._check_package_in_bin() else 0.0
 
-        return r_reach, r_grasp, r_lift, r_hover, r_place
+        return r_reach, r_contact, r_grasp, r_lift, r_hover, r_place
 
     def _get_highest_stage(self, staged):
         """Return name of highest achieved stage."""
-        r_reach, r_grasp, r_lift, r_hover, r_place = staged
+        r_reach, r_contact, r_grasp, r_lift, r_hover, r_place = staged
         if r_place > 0:
             return "place"
         elif r_hover > 0:
             return "hover"
-        elif r_lift > 0.35:
+        elif r_lift > 0.40:
             return "lift"
         elif r_grasp > 0:
             return "grasp"
+        elif r_contact > 0:
+            return "contact"
         else:
             return "reach"
 

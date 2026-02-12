@@ -10,16 +10,19 @@ from stable_baselines3.common.callbacks import (
     CheckpointCallback,
     EvalCallback,
 )
+from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import SubprocVecEnv
 
 from training.config import get_ppo_config
 
 
-def make_env(rank, seed=0):
+def make_env(rank, seed=0, monitor=False):
     """Return a callable that creates one MarwsEnv (for SubprocVecEnv)."""
     def _init():
         from simulation.env import MarwsEnv
         env = MarwsEnv()
+        if monitor:
+            env = Monitor(env)
         env.reset(seed=seed + rank)
         return env
     return _init
@@ -64,9 +67,10 @@ class StageTrackingCallback(BaseCallback):
 
     STAGES = [
         (0.9, "place"),
-        (0.5, "hover"),
-        (0.35, "lift/grasp"),
-        (0.20, "reach"),
+        (0.55, "hover"),
+        (0.40, "lift/grasp"),
+        (0.28, "contact"),
+        (0.15, "reach"),
     ]
 
     def __init__(self, verbose=1):
@@ -129,8 +133,8 @@ def train(timesteps, checkpoint_dir, resume):
     else:
         model = PPO("MlpPolicy", vec_env, tensorboard_log=log_dir, verbose=0, **config)
 
-    # Evaluation env (single, non-vectorized)
-    eval_env = SubprocVecEnv([make_env(100)])
+    # Evaluation env (single, wrapped with Monitor for proper episode stats)
+    eval_env = SubprocVecEnv([make_env(100, monitor=True)])
 
     callbacks = [
         GracefulShutdownCallback(save_dir=checkpoint_dir),
@@ -155,7 +159,7 @@ def train(timesteps, checkpoint_dir, resume):
     print(f"{'='*60}")
     print(f"Timesteps: {timesteps:,}")
     print(f"Envs: {n_envs}  |  n_steps: {model.n_steps}  |  batch_size: {model.batch_size}")
-    print("Reward stages: reach(0.30) -> grasp(0.35) -> lift(0.5) -> hover(0.7) -> place(1.0)")
+    print("Reward stages: reach(0.25) -> contact(0.35) -> grasp(0.40) -> lift(0.55) -> hover(0.75) -> place(1.0)")
     print(f"TensorBoard: tensorboard --logdir {os.path.abspath(log_dir)}")
     print(f"{'='*60}\n")
 
