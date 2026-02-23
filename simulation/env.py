@@ -57,8 +57,15 @@ class PandaPickAndPlaceEnv(gym.Env):
     # ---- Constants ----
     DISTANCE_THRESHOLD = 0.05      # 5cm success radius
     MIN_GOAL_DISTANCE = 0.08       # 8cm min distance between object start and goal
-    APPROACH_RADIUS = 0.05         # Gripper approach reward saturates within 5cm of object
-    APPROACH_WEIGHT = 1.0          # Weight of gripper-approach shaping (in step() only)
+
+    # Approach shaping constants (step() only, not compute_reward)
+    XY_APPROACH_RADIUS = 0.02      # XY penalty saturates within 2cm of object center
+    XY_APPROACH_WEIGHT = 1.0       # Weight of horizontal alignment reward
+    DESCENT_XY_THRESHOLD = 0.05    # Z descent reward only fires when XY within 5cm
+    Z_APPROACH_RADIUS = 0.01       # Z penalty saturates within 1cm of object height
+    Z_APPROACH_WEIGHT = 1.5        # Weight of Z descent reward
+    GRASP_ZONE = 0.05              # Lift shaping active when TCP within 5cm of object
+    W_LIFT = 5.0                   # Lift shaping weight (reward per meter of object rise)
     CARTESIAN_SCALE = 0.05         # Max 5cm displacement per step
     N_SUBSTEPS = 10                # Sim substeps per control step (20ms at 0.002s timestep)
     MAX_EPISODE_STEPS = 100        # ~4 seconds at 25 Hz
@@ -87,10 +94,13 @@ class PandaPickAndPlaceEnv(gym.Env):
     # Max joint delta per step (radians) - safety clamp
     MAX_DQ = 0.5
 
-    def __init__(self, render_mode=None, reward_type="dense"):
+    def __init__(self, render_mode=None, reward_type="dense",
+                 randomize_object=False, randomize_goals=True):
         super().__init__()
         self.render_mode = render_mode
         self.reward_type = reward_type
+        self.randomize_object = randomize_object
+        self.randomize_goals = randomize_goals
 
         # Load MuJoCo model
         self.model = mujoco.MjModel.from_xml_path(MODEL_XML_PATH)
@@ -101,6 +111,9 @@ class PandaPickAndPlaceEnv(gym.Env):
 
         # Set up initial state (home configuration)
         self._setup_initial_state()
+
+        # Previous object position for lift shaping (delta_z)
+        self._prev_obj_pos = self.data.xpos[self.package_body_id].copy()
 
         # Build observation and action spaces
         self.goal = self._sample_goal()
@@ -200,10 +213,13 @@ class PandaPickAndPlaceEnv(gym.Env):
         self.data.qvel[:] = self._init_qvel.copy()
         self.data.ctrl[:] = self._init_ctrl.copy()
 
-        # Randomize object XY position on table
-        obj_xy = self._init_qpos[self.pkg_qpos_addr: self.pkg_qpos_addr + 2].copy()
-        obj_xy += self.np_random.uniform(-self.OBJ_RANGE, self.OBJ_RANGE, size=2)
-        self.data.qpos[self.pkg_qpos_addr: self.pkg_qpos_addr + 2] = obj_xy
+        # Randomize object XY position on table (disabled by default for
+        # focused learning — enable with randomize_object=True once the
+        # agent has learned basic skills from a fixed starting position)
+        if self.randomize_object:
+            obj_xy = self._init_qpos[self.pkg_qpos_addr: self.pkg_qpos_addr + 2].copy()
+            obj_xy += self.np_random.uniform(-self.OBJ_RANGE, self.OBJ_RANGE, size=2)
+            self.data.qpos[self.pkg_qpos_addr: self.pkg_qpos_addr + 2] = obj_xy
 
         mujoco.mj_forward(self.model, self.data)
 
@@ -213,6 +229,9 @@ class PandaPickAndPlaceEnv(gym.Env):
 
         # Re-record settled object height
         self.height_offset = self.data.xpos[self.package_body_id][2]
+
+        # Initialize previous object position for lift shaping
+        self._prev_obj_pos = self.data.xpos[self.package_body_id].copy()
 
         # Sample a new goal and update visualization
         self.goal = self._sample_goal()
@@ -250,14 +269,34 @@ class PandaPickAndPlaceEnv(gym.Env):
         # Goal-distance reward (HER-compatible, used for relabeled transitions)
         reward = float(self.compute_reward(ag, dg, info))
 
-        # Gripper-approach shaping (step() only, NOT in compute_reward).
-        # Incentivizes the gripper to move toward the object.
-        # Saturates at APPROACH_RADIUS so there's no incentive to crash
-        # into the block -- the reward maxes out within this radius.
-        # Only affects 20% of training samples (real transitions);
-        # HER's 80% virtual transitions use compute_reward() directly.
-        approach_penalty = -max(grip_obj_dist - self.APPROACH_RADIUS, 0.0)
-        reward += self.APPROACH_WEIGHT * approach_penalty
+        # ---- Approach shaping (step() only, NOT compute_reward) ----
+        # Stage 1: XY alignment — pull gripper horizontally over object.
+        # Saturates within XY_APPROACH_RADIUS (2cm): strong gradient to approach,
+        # no penalty once aligned. Gated stages force top-down grasp geometry.
+        xy_dist = float(np.linalg.norm(tcp_pos[:2] - ag[:2]))
+        z_diff  = float(tcp_pos[2] - ag[2])   # positive = gripper above object
+
+        xy_penalty = -max(xy_dist - self.XY_APPROACH_RADIUS, 0.0)
+        reward += self.XY_APPROACH_WEIGHT * xy_penalty
+
+        # Stage 2: Z descent — descend once XY-aligned (forces top-down approach).
+        # Only fires within DESCENT_XY_THRESHOLD (5cm) so the arm is above the
+        # object before descending rather than approaching from the side.
+        if xy_dist < self.DESCENT_XY_THRESHOLD:
+            z_penalty = -max(abs(z_diff) - self.Z_APPROACH_RADIUS, 0.0)
+            reward += self.Z_APPROACH_WEIGHT * z_penalty
+
+        # ---- Lift shaping (step() only, NOT compute_reward) ----
+        # Fires only when TCP is in grasp zone AND the object is actually rising.
+        # Zero for hovering (delta_z=0). Replaces the old grasp closure bonus
+        # which created a hover local optimum: the agent must actually move the
+        # object upward to earn this reward, not merely close fingers near it.
+        delta_z = float(ag[2] - self._prev_obj_pos[2])
+        if grip_obj_dist < self.GRASP_ZONE and delta_z > 0:
+            reward += self.W_LIFT * delta_z
+
+        # Update previous object position for lift shaping
+        self._prev_obj_pos = ag.copy()
 
         terminated = False  # continuing task, no early termination
         truncated = self.current_step >= self.MAX_EPISODE_STEPS
@@ -418,49 +457,56 @@ class PandaPickAndPlaceEnv(gym.Env):
     # ==================================================================
 
     def _sample_goal(self):
-        """Sample a random goal with minimum distance from the object.
+        """Sample a goal position for the current episode.
 
-        Goal distribution (designed for progressive HER learning):
-          30% near-object: within 10cm of object start — easy targets for
-              early learning. HER relabeling works best when some goals
-              are achievable with simple motions.
-          20% table-slide: anywhere on the table surface — teaches lateral
-              transport without requiring a lift.
-          50% lifted: workspace position above table — full pick-and-place.
+        When randomize_goals=False:
+            Returns a fixed goal 10cm in front of the object at table height.
+            Gives the agent a single consistent task to master before adding
+            variety. HER still relabels with achieved positions, providing
+            goal diversity for free.
 
-        A minimum distance of MIN_GOAL_DISTANCE (8cm) is enforced between
-        the sampled goal and the object's current position to prevent
-        trivial initial successes. This is 3cm beyond the 5cm success
-        threshold, ensuring the agent must always move the object.
+        When randomize_goals=True:
+            Goal distribution (designed for progressive HER learning):
+              30% near-object: within 10cm of object start — easy targets
+              20% table-slide: broad XY range at table height
+              50% lifted: workspace position above table
+
+            MIN_GOAL_DISTANCE (8cm) prevents trivial initial successes.
         """
         obj_pos = self.data.xpos[self.package_body_id].copy()
 
+        if not self.randomize_goals:
+            # Fixed goal: 10cm in front of the object at table height.
+            # Simple, repeatable task for initial skill acquisition.
+            goal = obj_pos.copy()
+            goal[0] += 0.10  # 10cm forward (toward robot base)
+            goal = np.clip(goal, self.TCP_BOUNDS_LOW, self.TCP_BOUNDS_HIGH)
+            return goal.copy()
+
+        # --- Random goal sampling (lift-biased distribution) ---
+        # Root cause fix: ~50% of former goals were at table height, causing the
+        # base reward to PENALIZE lifting (object moves away from table-height goal).
+        # New split: 10% near-object (HER bootstrap), 90% lifted workspace.
         for _ in range(100):
             r = self.np_random.random()
 
-            if r < 0.3:
-                # Near-object goals: within 10cm XY, at table height or slightly above
+            if r < 0.10:
+                # Near-object goals: provides easy HER curriculum for early learning.
+                # Table height only — these teach the agent that moving the object
+                # to a nearby XY position is rewarded.
                 goal = obj_pos.copy()
                 goal[0] += self.np_random.uniform(-0.10, 0.10)
                 goal[1] += self.np_random.uniform(-0.10, 0.10)
                 goal[2] = self.height_offset
-                if self.np_random.random() < 0.3:
-                    goal[2] += self.np_random.uniform(0.0, 0.10)
-            elif r < 0.5:
-                # Table-slide goals: broad XY range, table height
-                goal = np.array([
-                    0.50 + self.np_random.uniform(-0.15, 0.15),
-                    0.00 + self.np_random.uniform(-0.35, 0.35),
-                    self.height_offset,
-                ])
             else:
-                # Full workspace goals (original distribution + lift)
+                # Lifted workspace goals (90%): object must be raised to succeed.
+                # Always at least 5cm above table so lifting is strictly required.
                 goal = np.array([
                     0.50 + self.np_random.uniform(-0.15, 0.15),
                     0.00 + self.np_random.uniform(-0.25, 0.25),
                     self.height_offset,
                 ])
-                goal[2] += self.np_random.uniform(0.0, 0.20)
+                goal[2] += self.np_random.uniform(0.05, 0.20)
 
             goal = np.clip(goal, self.TCP_BOUNDS_LOW, self.TCP_BOUNDS_HIGH)
 

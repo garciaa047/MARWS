@@ -39,11 +39,14 @@ torch.set_num_threads(2)
 torch.set_num_interop_threads(1)
 
 
-def make_env(seed=0):
+def make_env(seed=0, randomize_object=False, randomize_goals=True):
     """Create a single MarwsEnv instance wrapped in Monitor."""
     def _init():
         from simulation.env import PandaPickAndPlaceEnv
-        env = PandaPickAndPlaceEnv()
+        env = PandaPickAndPlaceEnv(
+            randomize_object=randomize_object,
+            randomize_goals=randomize_goals,
+        )
         env = Monitor(env)
         env.reset(seed=seed)
         return env
@@ -80,7 +83,9 @@ class GracefulShutdownCallback(BaseCallback):
             path = os.path.join(self.save_dir, "interrupt_model")
             self.model.save(path)
             if self.train_env is not None:
-                self.train_env.save(os.path.join(self.save_dir, "interrupt_vecnormalize.pkl"))
+                # Save as vecnormalize.pkl (not interrupt_vecnormalize.pkl) so that
+                # scripts/evaluate.py can find it regardless of how training stopped.
+                self.train_env.save(os.path.join(self.save_dir, "vecnormalize.pkl"))
             if self.verbose:
                 print(f"Model saved to {path}.zip")
             return False
@@ -91,6 +96,27 @@ class GracefulShutdownCallback(BaseCallback):
             signal.signal(signal.SIGINT, self._prev_handler)
         if hasattr(self, "_prev_break_handler") and self._prev_break_handler is not None:
             signal.signal(signal.SIGBREAK, self._prev_break_handler)
+
+
+class VecNormalizeSaveCallback(BaseCallback):
+    """Periodically save VecNormalize stats so evaluate works after a hard kill.
+
+    CheckpointCallback saves model weights but not normalization stats.
+    Without vecnormalize.pkl, evaluate.py runs without observation normalization
+    and produces meaningless predictions. This callback saves vecnormalize.pkl
+    on the same cadence as CheckpointCallback so any checkpoint is usable.
+    """
+
+    def __init__(self, save_freq, save_path, train_env, verbose=0):
+        super().__init__(verbose)
+        self.save_freq = save_freq
+        self.save_path = save_path
+        self.train_env = train_env
+
+    def _on_step(self):
+        if self.num_timesteps % self.save_freq == 0:
+            self.train_env.save(os.path.join(self.save_path, "vecnormalize.pkl"))
+        return True
 
 
 class SuccessRateCallback(BaseCallback):
@@ -172,13 +198,16 @@ class SuccessRateCallback(BaseCallback):
         return True
 
 
-def train(timesteps, checkpoint_dir, resume):
+def train(timesteps, checkpoint_dir, resume,
+          randomize_object=False, randomize_goals=True):
     """Train with SAC + HER.
 
     Args:
         timesteps: Total environment timesteps.
         checkpoint_dir: Directory for models, logs, and checkpoints.
         resume: Path to .zip model to resume from, or None.
+        randomize_object: Randomize object XY each episode (default: off).
+        randomize_goals: Sample random goals each episode (default: on).
     """
     config = get_sac_config()
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -186,7 +215,10 @@ def train(timesteps, checkpoint_dir, resume):
     vecnorm_path = os.path.join(checkpoint_dir, "vecnormalize.pkl")
 
     # Training environment with observation normalization
-    train_env = DummyVecEnv([make_env(seed=0)])
+    train_env = DummyVecEnv([make_env(
+        seed=0, randomize_object=randomize_object,
+        randomize_goals=randomize_goals,
+    )])
     if resume and os.path.exists(vecnorm_path):
         train_env = VecNormalize.load(vecnorm_path, train_env)
         print(f"Loaded normalization stats from {vecnorm_path}")
@@ -214,7 +246,10 @@ def train(timesteps, checkpoint_dir, resume):
         )
 
     # Evaluation environment (uses same normalization stats but doesn't update them)
-    eval_env = DummyVecEnv([make_env(seed=100)])
+    eval_env = DummyVecEnv([make_env(
+        seed=100, randomize_object=randomize_object,
+        randomize_goals=randomize_goals,
+    )])
     eval_env = VecNormalize(
         eval_env, norm_obs=True, norm_reward=False, clip_obs=10.0,
         training=False,
@@ -225,6 +260,11 @@ def train(timesteps, checkpoint_dir, resume):
     callbacks = CallbackList([
         GracefulShutdownCallback(save_dir=checkpoint_dir, train_env=train_env),
         SuccessRateCallback(log_freq=5000, verbose=1),
+        VecNormalizeSaveCallback(
+            save_freq=50_000,
+            save_path=checkpoint_dir,
+            train_env=train_env,
+        ),
         EvalCallback(
             eval_env,
             best_model_save_path=checkpoint_dir,
@@ -255,6 +295,8 @@ def train(timesteps, checkpoint_dir, resume):
     print(f"Gamma:         {config['gamma']}")
     print(f"Buffer size:   {config['buffer_size']:,}")
     print(f"Train freq:    {config['train_freq']} steps")
+    print(f"Rand object:   {'ON' if randomize_object else 'OFF (fixed position)'}")
+    print(f"Rand goals:    {'ON (tiered distribution)' if randomize_goals else 'OFF (fixed goal)'}")
     print(f"Obs normalize: VecNormalize (running mean/std)")
     print(f"Torch threads: {torch.get_num_threads()}")
     print(f"TensorBoard:   tensorboard --logdir {os.path.abspath(log_dir)}")
@@ -280,8 +322,8 @@ def train(timesteps, checkpoint_dir, resume):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train MARWS with SAC + HER")
     parser.add_argument(
-        "--timesteps", type=int, default=2_000_000,
-        help="Total environment timesteps (default: 2M, realistic for overnight CPU)",
+        "--timesteps", type=int, default=5_000_000,
+        help="Total environment timesteps (default: 5M, ~21h on CPU)",
     )
     parser.add_argument(
         "--checkpoint-dir", type=str,
@@ -292,6 +334,18 @@ if __name__ == "__main__":
         "--resume", type=str, default=None,
         help="Path to .zip model to resume training from",
     )
+    parser.add_argument(
+        "--randomize-object", action="store_true",
+        help="Randomize object XY position each episode (off by default)",
+    )
+    parser.add_argument(
+        "--fixed-goal", action="store_true",
+        help="Use a single fixed goal instead of random sampling",
+    )
     args = parser.parse_args()
 
-    train(args.timesteps, args.checkpoint_dir, args.resume)
+    train(
+        args.timesteps, args.checkpoint_dir, args.resume,
+        randomize_object=args.randomize_object,
+        randomize_goals=not args.fixed_goal,
+    )
